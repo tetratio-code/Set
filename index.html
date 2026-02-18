@@ -261,3 +261,446 @@
           <div class="v" id="score">0</div>
         </div>
         <div class="stat">
+          <div class="k">剩餘牌堆</div>
+          <div class="v" id="deckLeft">81</div>
+        </div>
+        <div class="stat">
+          <div class="k">桌上牌數</div>
+          <div class="v" id="tableCount">0</div>
+        </div>
+        <div class="stat">
+          <div class="k">找到的 Set</div>
+          <div class="v" id="setsFound">0</div>
+        </div>
+      </div>
+
+      <div class="controls">
+        <button id="btnDeal">補 3 張（如果沒有 Set）</button>
+        <button id="btnHint" class="secondary">提示（標出一張 Set 內的牌）</button>
+        <button id="btnFindSet" class="secondary">自動找一組 Set（會選起來）</button>
+        <button id="btnClear" class="secondary">清除選取</button>
+        <button id="btnNew" class="danger">新遊戲</button>
+      </div>
+
+      <div class="msg" id="message">
+        點 3 張牌。如果每個屬性都「全相同」或「全不同」，就是 Set。
+      </div>
+
+      <div class="rules">
+        <div style="margin-top:10px">
+          <b>屬性（4 個）</b><br/>
+          形狀：橢圓/菱形/波浪　數量：1/2/3<br/>
+          顏色：紅/綠/紫　填充：空心/條紋/實心
+        </div>
+        <div style="margin-top:10px">
+          快捷鍵：<code>H</code> 提示、<code>F</code> 找 Set、<code>C</code> 清除、<code>N</code> 新遊戲
+        </div>
+      </div>
+    </div>
+
+    <div class="panel main">
+      <div class="topbar">
+        <div class="left">
+          <div style="font-weight:800; letter-spacing:.2px;">桌面</div>
+          <div class="sub" id="subline">請找出 Set！</div>
+        </div>
+        <div class="right">
+          <span class="chip" id="chipHasSet">Set：檢查中…</span>
+          <span class="chip" id="chipSelected">已選 0 / 3</span>
+        </div>
+      </div>
+
+      <div class="grid" id="grid"></div>
+      <div class="footer-note" id="footerNote"></div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  // ==== Game definitions ====
+  const SHAPES = ["oval", "diamond", "squiggle"];   // 0,1,2
+  const COLORS = ["red", "green", "purple"];       // 0,1,2
+  const FILLS  = ["open", "striped", "solid"];     // 0,1,2
+  // number: 0..2 => 1..3
+
+  const COLOR_HEX = {
+    red:    "#ff5c7a",
+    green:  "#33d17a",
+    purple: "#a78bfa",
+  };
+
+  // State
+  let deck = [];
+  let table = [];
+  let selected = new Set(); // stores card ids
+  let hintMark = new Set(); // stores card ids (highlight)
+  let score = 0;
+  let setsFound = 0;
+
+  // DOM
+  const grid = document.getElementById("grid");
+  const scoreEl = document.getElementById("score");
+  const deckLeftEl = document.getElementById("deckLeft");
+  const tableCountEl = document.getElementById("tableCount");
+  const setsFoundEl = document.getElementById("setsFound");
+  const messageEl = document.getElementById("message");
+  const chipSelectedEl = document.getElementById("chipSelected");
+  const chipHasSetEl = document.getElementById("chipHasSet");
+  const sublineEl = document.getElementById("subline");
+  const footerNoteEl = document.getElementById("footerNote");
+
+  // Buttons
+  const btnDeal = document.getElementById("btnDeal");
+  const btnHint = document.getElementById("btnHint");
+  const btnFindSet = document.getElementById("btnFindSet");
+  const btnClear = document.getElementById("btnClear");
+  const btnNew = document.getElementById("btnNew");
+
+  // ==== Utilities ====
+  const randInt = (n) => Math.floor(Math.random() * n);
+
+  function shuffle(a){
+    for (let i = a.length - 1; i > 0; i--){
+      const j = randInt(i + 1);
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+
+  function setMessage(text, kind = "neutral"){
+    messageEl.classList.remove("good", "bad");
+    if (kind === "good") messageEl.classList.add("good");
+    if (kind === "bad") messageEl.classList.add("bad");
+    messageEl.textContent = text;
+  }
+
+  function updateStats(){
+    scoreEl.textContent = String(score);
+    deckLeftEl.textContent = String(deck.length);
+    tableCountEl.textContent = String(table.length);
+    setsFoundEl.textContent = String(setsFound);
+
+    chipSelectedEl.textContent = `已選 ${selected.size} / 3`;
+
+    const has = findAnySet(table) !== null;
+    chipHasSetEl.textContent = has ? "Set：有 ✅" : (deck.length ? "Set：沒有（可補牌）" : "Set：沒有（牌堆空）");
+    footerNoteEl.textContent = deck.length
+      ? "提示：若桌上沒有 Set，按「補 3 張」。"
+      : "牌堆已空：盡量把桌面找完吧。";
+  }
+
+  // Card ID: encode 4 ternary digits into 0..80
+  // digits: shape, color, fill, number
+  function makeDeck(){
+    const d = [];
+    let id = 0;
+    for (let shape=0; shape<3; shape++){
+      for (let color=0; color<3; color++){
+        for (let fill=0; fill<3; fill++){
+          for (let num=0; num<3; num++){
+            d.push({ id, shape, color, fill, num });
+            id++;
+          }
+        }
+      }
+    }
+    return shuffle(d);
+  }
+
+  function deal(n){
+    for (let i=0; i<n; i++){
+      if (!deck.length) break;
+      table.push(deck.pop());
+    }
+  }
+
+  function clearSelection(){
+    selected.clear();
+    hintMark.clear();
+    render();
+  }
+
+  // Check if 3 cards form a SET:
+  // For each attribute, sum mod 3 == 0 (since values are 0,1,2).
+  function isSet(a,b,c){
+    const attrs = ["shape","color","fill","num"];
+    for (const k of attrs){
+      if ( (a[k] + b[k] + c[k]) % 3 !== 0 ) return false;
+    }
+    return true;
+  }
+
+  function findAnySet(cards){
+    const n = cards.length;
+    // map id -> card for quick lookup (optional), but brute triple is ok up to ~21.
+    for (let i=0; i<n; i++){
+      for (let j=i+1; j<n; j++){
+        for (let k=j+1; k<n; k++){
+          if (isSet(cards[i], cards[j], cards[k])) return [cards[i], cards[j], cards[k]];
+        }
+      }
+    }
+    return null;
+  }
+
+  function removeCardsById(ids){
+    const idSet = new Set(ids);
+    table = table.filter(c => !idSet.has(c.id));
+  }
+
+  // ==== Rendering ====
+  function render(){
+    grid.innerHTML = "";
+    const byId = new Map(table.map(c => [c.id, c]));
+
+    for (let idx=0; idx<table.length; idx++){
+      const c = table[idx];
+      const cardEl = document.createElement("div");
+      cardEl.className = "card";
+      if (selected.has(c.id)) cardEl.classList.add("selected");
+      if (hintMark.has(c.id)) cardEl.classList.add("hint");
+      cardEl.setAttribute("role","button");
+      cardEl.tabIndex = 0;
+
+      const idxEl = document.createElement("div");
+      idxEl.className = "idx";
+      idxEl.textContent = String(idx + 1);
+      cardEl.appendChild(idxEl);
+
+      cardEl.appendChild(drawCardSVG(c));
+
+      cardEl.addEventListener("click", () => onCardClick(c.id));
+      cardEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onCardClick(c.id);
+        }
+      });
+
+      grid.appendChild(cardEl);
+    }
+
+    // subline
+    const setNow = findAnySet(table);
+    if (setNow){
+      sublineEl.textContent = "桌上有 Set！";
+    } else if (deck.length){
+      sublineEl.textContent = "桌上沒有 Set，可補 3 張。";
+    } else {
+      sublineEl.textContent = "桌上沒有 Set，而且牌堆空了。";
+    }
+
+    updateStats();
+  }
+
+  function drawCardSVG(card){
+    const shape = SHAPES[card.shape];
+    const colorName = COLORS[card.color];
+    const fill = FILLS[card.fill];
+    const count = card.num + 1;
+    const stroke = COLOR_HEX[colorName];
+
+    const svgNS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(svgNS, "svg");
+    svg.setAttribute("viewBox", "0 0 200 110");
+    svg.setAttribute("aria-label", `${shape} ${colorName} ${fill} x${count}`);
+
+    // background for subtle contrast
+    const bg = document.createElementNS(svgNS, "rect");
+    bg.setAttribute("x","0"); bg.setAttribute("y","0");
+    bg.setAttribute("width","200"); bg.setAttribute("height","110");
+    bg.setAttribute("rx","14");
+    bg.setAttribute("fill","rgba(0,0,0,0)");
+    svg.appendChild(bg);
+
+    // striped pattern (unique per card id for stable)
+    const defs = document.createElementNS(svgNS, "defs");
+    const pat = document.createElementNS(svgNS, "pattern");
+    const patId = `p_${card.id}`;
+    pat.setAttribute("id", patId);
+    pat.setAttribute("patternUnits","userSpaceOnUse");
+    pat.setAttribute("width","8");
+    pat.setAttribute("height","8");
+
+    const line = document.createElementNS(svgNS, "path");
+    line.setAttribute("d","M0 8 L8 0");
+    line.setAttribute("stroke", stroke);
+    line.setAttribute("stroke-width","2");
+    line.setAttribute("opacity","0.9");
+    pat.appendChild(line);
+    defs.appendChild(pat);
+    svg.appendChild(defs);
+
+    // positions for 1/2/3 symbols
+    const xs = [100, 100, 100];
+    const ys = count === 1 ? [55] : (count === 2 ? [38, 72] : [28, 55, 82]);
+
+    for (let i=0; i<count; i++){
+      const g = document.createElementNS(svgNS, "g");
+      g.setAttribute("transform", `translate(${xs[i]}, ${ys[i]})`);
+      const p = shapePath(shape);
+
+      const path = document.createElementNS(svgNS, "path");
+      path.setAttribute("d", p);
+      path.setAttribute("stroke", stroke);
+      path.setAttribute("stroke-width","4");
+      path.setAttribute("stroke-linejoin","round");
+      path.setAttribute("stroke-linecap","round");
+
+      if (fill === "open"){
+        path.setAttribute("fill", "rgba(0,0,0,0)");
+      } else if (fill === "solid"){
+        path.setAttribute("fill", stroke);
+        path.setAttribute("opacity","0.95");
+      } else { // striped
+        path.setAttribute("fill", `url(#${patId})`);
+      }
+
+      g.appendChild(path);
+      svg.appendChild(g);
+    }
+
+    return svg;
+  }
+
+  function shapePath(shape){
+    // Paths are centered around (0,0)
+    // oval: rounded rectangle-ish
+    if (shape === "oval"){
+      return "M-55 -18 C-70 -18 -70 18 -55 18 L55 18 C70 18 70 -18 55 -18 Z";
+    }
+    // diamond
+    if (shape === "diamond"){
+      return "M0 -28 L60 0 L0 28 L-60 0 Z";
+    }
+    // squiggle (simple bezier)
+    return "M-62 -12 C-42 -38 -10 -38 8 -20 C22 -6 32 -6 50 -18 C70 -34 78 -6 54 8 C40 18 18 34 -6 18 C-24 6 -38 6 -54 18 C-74 34 -86 8 -62 -12 Z";
+  }
+
+  // ==== Interactions ====
+  function onCardClick(cardId){
+    // remove hint highlight when interacting
+    hintMark.clear();
+
+    if (selected.has(cardId)) selected.delete(cardId);
+    else {
+      if (selected.size >= 3) {
+        // replace selection behavior: if already 3, reset and select new one
+        selected.clear();
+      }
+      selected.add(cardId);
+    }
+
+    if (selected.size === 3){
+      const chosen = [...selected].map(id => table.find(c => c.id === id)).filter(Boolean);
+      if (chosen.length === 3 && isSet(chosen[0], chosen[1], chosen[2])){
+        // success
+        score += 3;
+        setsFound += 1;
+        setMessage("✅ 這是一組 SET！已移除並補牌（若牌堆有）。", "good");
+
+        removeCardsById([...selected]);
+        selected.clear();
+
+        // Classic rule: keep 12 on table if possible
+        while (table.length < 12 && deck.length) deal(1);
+
+        render();
+
+        // If game ends
+        checkEnd();
+        return;
+      } else {
+        // fail
+        score = Math.max(0, score - 1);
+        setMessage("❌ 不是 SET（每個屬性要嘛全相同、要嘛全不同）。扣 1 分。", "bad");
+        // keep selection but allow user to change
+        render();
+        return;
+      }
+    }
+
+    render();
+  }
+
+  function checkEnd(){
+    const any = findAnySet(table);
+    if (!any && deck.length === 0){
+      setMessage(`🎉 遊戲結束！分數 ${score}，共找到 ${setsFound} 組 SET。`, "good");
+    }
+  }
+
+  function dealIfNoSet(){
+    const any = findAnySet(table);
+    if (any){
+      setMessage("桌上其實有 SET！你可以按「提示」或自己找找看。", "neutral");
+      return;
+    }
+    if (deck.length === 0){
+      setMessage("牌堆已空，不能補牌。", "bad");
+      return;
+    }
+    deal(3);
+    setMessage("已補 3 張。", "neutral");
+    render();
+  }
+
+  function hintOneCard(){
+    const any = findAnySet(table);
+    if (!any){
+      setMessage(deck.length ? "桌上沒有 SET，請補牌。" : "桌上沒有 SET，而且牌堆空了。", "neutral");
+      return;
+    }
+    // highlight one card from a valid set
+    const pick = any[randInt(3)];
+    hintMark = new Set([pick.id]);
+    setMessage("💡 已用綠框標出其中一張 SET 內的牌。", "neutral");
+    render();
+  }
+
+  function autoFindSet(){
+    const any = findAnySet(table);
+    if (!any){
+      setMessage(deck.length ? "桌上沒有 SET，請補牌。" : "桌上沒有 SET，而且牌堆空了。", "neutral");
+      return;
+    }
+    selected.clear();
+    for (const c of any) selected.add(c.id);
+    setMessage("已選取一組 SET（再點一下任一張可觸發判定/移除）。", "neutral");
+    render();
+  }
+
+  function newGame(){
+    deck = makeDeck();
+    table = [];
+    selected.clear();
+    hintMark.clear();
+    score = 0;
+    setsFound = 0;
+
+    deal(12);
+    setMessage("新遊戲開始！點 3 張牌找出 SET。", "neutral");
+    render();
+  }
+
+  // ==== Wire up ====
+  btnDeal.addEventListener("click", dealIfNoSet);
+  btnHint.addEventListener("click", hintOneCard);
+  btnFindSet.addEventListener("click", autoFindSet);
+  btnClear.addEventListener("click", () => { setMessage("已清除選取。", "neutral"); clearSelection(); });
+  btnNew.addEventListener("click", newGame);
+
+  window.addEventListener("keydown", (e) => {
+    const k = e.key.toLowerCase();
+    if (k === "h") hintOneCard();
+    if (k === "f") autoFindSet();
+    if (k === "c") { setMessage("已清除選取。", "neutral"); clearSelection(); }
+    if (k === "n") newGame();
+  });
+
+  // Start
+  newGame();
+})();
+</script>
+</body>
+</html>
